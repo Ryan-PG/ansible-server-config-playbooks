@@ -24,6 +24,11 @@
       prompt: "Do you want to configure custom mirrors? (yes/no)"
       private: false
       default: "no"
+    
+    - name: "use_docker_mirror"
+      prompt: "Do you want to configure a custom Docker mirror/registry? (yes/no)"
+      private: false
+      default: "no"
 
   vars:
     mirrors:
@@ -158,6 +163,56 @@
             - CentOS-Extras.repo
           when: use_custom_mirrors | bool
       when: ansible_distribution in ["CentOS", "Red Hat Enterprise Linux", "Rocky", "AlmaLinux"]
+
+    # Docker Mirror Configuration Section
+    - name: Prompt for Docker mirror settings
+      block:
+        - name: Get Docker registry mirror URL
+          pause:
+            prompt: "Enter Docker registry mirror URL (e.g., https://mirror.gcr.io or https://docker-mirror.example.com)"
+          register: docker_mirror_url
+          when: use_docker_mirror | bool
+
+        - name: Get additional registry mirror URLs (optional, comma-separated)
+          pause:
+            prompt: "Enter additional registry mirrors (comma-separated) or press Enter to skip"
+          register: docker_additional_mirrors
+          when: use_docker_mirror | bool
+
+        - name: Set Docker mirror variables
+          set_fact:
+            docker_primary_mirror: "{{ docker_mirror_url.user_input }}"
+            docker_extra_mirrors: "{{ docker_additional_mirrors.user_input.split(',') if docker_additional_mirrors.user_input else [] }}"
+          when: use_docker_mirror | bool
+
+    - name: Create Docker daemon configuration directory
+      file:
+        path: /etc/docker
+        state: directory
+        mode: '0755'
+      when: use_docker_mirror | bool
+
+    - name: Configure Docker daemon with registry mirrors
+      copy:
+        content: |
+          {
+            "registry-mirrors": [
+              "{{ docker_primary_mirror }}"
+              {% for mirror in docker_extra_mirrors %}
+              ,"{{ mirror | trim }}"
+              {% endfor %}
+            ],
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "storage-driver": "overlay2"
+          }
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+      when: use_docker_mirror | bool
+      notify: restart docker
 
     # Package Management
     - name: Update apt cache (Ubuntu/Debian)
@@ -318,6 +373,22 @@
       debug:
         msg: "Docker installed: {{ docker_version.stdout }}"
 
+    - name: Display Docker mirror configuration
+      debug:
+        msg: "Docker registry mirror configured: {{ docker_primary_mirror }}"
+      when: use_docker_mirror | bool
+
+    - name: Verify Docker mirror configuration
+      shell: docker info | grep -A 5 "Registry Mirrors"
+      register: docker_mirror_check
+      changed_when: false
+      when: use_docker_mirror | bool
+
+    - name: Display Docker mirror status
+      debug:
+        msg: "{{ docker_mirror_check.stdout_lines }}"
+      when: use_docker_mirror | bool
+
     - name: Verify Nginx installation
       shell: nginx -v 2>&1
       register: nginx_version
@@ -326,3 +397,10 @@
     - name: Display Nginx version
       debug:
         msg: "Nginx installed: {{ nginx_version.stdout }}"
+
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
+        daemon_reload: yes
