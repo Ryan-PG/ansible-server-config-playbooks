@@ -1,0 +1,328 @@
+---
+# playbooks/server_setup.yml
+# Main playbook for server configuration
+
+- name: Server Setup and Configuration
+  hosts: all
+  become: true
+  vars_prompt:
+    - name: "username"
+      prompt: "Enter the username to create"
+      private: false
+    
+    - name: "user_password"
+      prompt: "Enter the password for the user"
+      private: true
+      confirm: true
+    
+    - name: "make_sudo"
+      prompt: "Should this user have sudo privileges? (yes/no)"
+      private: false
+      default: "no"
+    
+    - name: "use_custom_mirrors"
+      prompt: "Do you want to configure custom mirrors? (yes/no)"
+      private: false
+      default: "no"
+
+  vars:
+    mirrors:
+      ubuntu:
+        - "http://archive.ubuntu.com/ubuntu/"
+        - "http://security.ubuntu.com/ubuntu/"
+      debian:
+        - "http://deb.debian.org/debian/"
+        - "http://security.debian.org/debian-security/"
+      centos:
+        - "http://mirror.centos.org/centos/"
+    
+    packages_to_install:
+      - curl
+      - wget
+      - vim
+      - htop
+      - git
+      - net-tools
+      - docker.io
+      - nginx
+      - python3
+      - python3-pip
+      - ufw
+      - fail2ban
+
+  tasks:
+    # User Creation Section
+    - name: Create user group
+      group:
+        name: "{{ username }}"
+        state: present
+      when: username != "root"
+
+    - name: Create user account
+      user:
+        name: "{{ username }}"
+        password: "{{ user_password | password_hash('sha512') }}"
+        shell: /bin/bash
+        groups: "{{ username }}"
+        append: yes
+        create_home: yes
+        state: present
+      when: username != "root"
+
+    - name: Add user to sudo group if requested
+      user:
+        name: "{{ username }}"
+        groups: sudo
+        append: yes
+      when: 
+        - make_sudo | bool
+        - username != "root"
+
+    - name: Create sudoers file for passwordless sudo
+      copy:
+        content: "{{ username }} ALL=(ALL:ALL) NOPASSWD: ALL"
+        dest: "/etc/sudoers.d/{{ username }}"
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: 
+        - make_sudo | bool
+        - username != "root"
+
+    # Mirror Configuration Section
+    - name: Prompt for mirror URLs if custom mirrors requested
+      block:
+        - name: Get primary mirror URL
+          pause:
+            prompt: "Enter primary mirror URL (e.g., http://mirror.example.com/ubuntu/)"
+          register: primary_mirror
+          when: use_custom_mirrors | bool
+
+        - name: Get security mirror URL
+          pause:
+            prompt: "Enter security mirror URL (e.g., http://mirror.example.com/ubuntu-security/)"
+          register: security_mirror
+          when: use_custom_mirrors | bool
+
+        - name: Set mirror variables
+          set_fact:
+            primary_mirror_url: "{{ primary_mirror.user_input }}"
+            security_mirror_url: "{{ security_mirror.user_input }}"
+          when: use_custom_mirrors | bool
+
+    # Ubuntu/Debian Mirror Configuration
+    - name: Configure Ubuntu mirrors
+      block:
+        - name: Backup original sources.list
+          copy:
+            src: /etc/apt/sources.list
+            dest: "/etc/apt/sources.list.backup.{{ ansible_date_time.epoch }}"
+            remote_src: yes
+          when: use_custom_mirrors | bool
+
+        - name: Update Ubuntu sources.list with custom mirrors
+          template:
+            src: sources.list.j2
+            dest: /etc/apt/sources.list
+            backup: yes
+          when: use_custom_mirrors | bool
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    # CentOS/RHEL Mirror Configuration
+    - name: Configure CentOS/RHEL mirrors
+      block:
+        - name: Backup original repo files
+          shell: |
+            mkdir -p /etc/yum.repos.d/backup.{{ ansible_date_time.epoch }}
+            cp /etc/yum.repos.d/*.repo /etc/yum.repos.d/backup.{{ ansible_date_time.epoch }}/
+          when: use_custom_mirrors | bool
+
+        - name: Update CentOS repositories with custom mirrors
+          replace:
+            path: "/etc/yum.repos.d/{{ item }}"
+            regexp: '^mirrorlist=.*'
+            replace: '#mirrorlist disabled'
+          loop:
+            - CentOS-Base.repo
+            - CentOS-AppStream.repo
+            - CentOS-Extras.repo
+          when: use_custom_mirrors | bool
+
+        - name: Set baseurl for custom mirrors in CentOS
+          replace:
+            path: "/etc/yum.repos.d/{{ item }}"
+            regexp: '^#baseurl=.*'
+            replace: "baseurl={{ primary_mirror_url }}"
+          loop:
+            - CentOS-Base.repo
+            - CentOS-AppStream.repo
+            - CentOS-Extras.repo
+          when: use_custom_mirrors | bool
+      when: ansible_distribution in ["CentOS", "Red Hat Enterprise Linux", "Rocky", "AlmaLinux"]
+
+    # Package Management
+    - name: Update apt cache (Ubuntu/Debian)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+      changed_when: false
+
+    - name: Upgrade all packages (Ubuntu/Debian)
+      apt:
+        upgrade: dist
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    - name: Update yum cache (CentOS/RHEL)
+      yum:
+        update_cache: yes
+      when: ansible_distribution in ["CentOS", "Red Hat Enterprise Linux", "Rocky", "AlmaLinux"]
+      changed_when: false
+
+    - name: Upgrade all packages (CentOS/RHEL)
+      yum:
+        name: '*'
+        state: latest
+      when: ansible_distribution in ["CentOS", "Red Hat Enterprise Linux", "Rocky", "AlmaLinux"]
+
+    # Package Installation
+    - name: Install common packages (Ubuntu/Debian)
+      apt:
+        name: "{{ packages_to_install }}"
+        state: present
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    - name: Install common packages (CentOS/RHEL)
+      yum:
+        name: 
+          - curl
+          - wget
+          - vim-enhanced
+          - htop
+          - git
+          - net-tools
+          - python3
+          - python3-pip
+          - nginx
+        state: present
+      when: ansible_distribution in ["CentOS", "Red Hat Enterprise Linux", "Rocky", "AlmaLinux"]
+
+    - name: Install EPEL repository (CentOS/RHEL)
+      yum:
+        name: epel-release
+        state: present
+      when: ansible_distribution in ["CentOS", "Red Hat Enterprise Linux", "Rocky", "AlmaLinux"]
+
+    # Docker Installation (Ubuntu/Debian)
+    - name: Install Docker dependencies (Ubuntu/Debian)
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    - name: Add Docker GPG key (Ubuntu/Debian)
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    - name: Add Docker repository (Ubuntu)
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Install Docker (Ubuntu/Debian)
+      apt:
+        name: docker-ce
+        state: present
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    # Docker Installation (CentOS/RHEL)
+    - name: Install Docker (CentOS/RHEL)
+      yum:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+      when: ansible_distribution in ["CentOS", "Red Hat Enterprise Linux", "Rocky", "AlmaLinux"]
+
+    # Service Management
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ username }}"
+        groups: docker
+        append: yes
+      when: username != "root"
+
+    - name: Start and enable Nginx service
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Start and enable UFW firewall
+      systemd:
+        name: ufw
+        state: started
+        enabled: yes
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    # Firewall Configuration
+    - name: Configure UFW rules
+      ufw:
+        rule: "{{ item.rule }}"
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+      loop:
+        - { rule: 'allow', port: '22', proto: 'tcp' }
+        - { rule: 'allow', port: '80', proto: 'tcp' }
+        - { rule: 'allow', port: '443', proto: 'tcp' }
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        default: deny
+      when: ansible_distribution in ["Ubuntu", "Debian"]
+
+    # Verification Section
+    - name: Verify user creation
+      shell: id {{ username }}
+      register: user_check
+      changed_when: false
+
+    - name: Display user information
+      debug:
+        msg:
+          - "User {{ username }} created successfully"
+          - "Sudo privileges: {{ 'Yes' if make_sudo | bool else 'No' }}"
+          - "Home directory: /home/{{ username }}"
+
+    - name: Verify Docker installation
+      shell: docker --version
+      register: docker_version
+      changed_when: false
+
+    - name: Display Docker version
+      debug:
+        msg: "Docker installed: {{ docker_version.stdout }}"
+
+    - name: Verify Nginx installation
+      shell: nginx -v 2>&1
+      register: nginx_version
+      changed_when: false
+
+    - name: Display Nginx version
+      debug:
+        msg: "Nginx installed: {{ nginx_version.stdout }}"
