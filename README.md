@@ -1,4 +1,5 @@
-# Server Configurations Ansible Playbooks
+# Linux Server Configurations Ansible Playbooks
+Into this repo, I try to put some ansible playbooks for handling and configuring linux servers.
 
 ## 01.server-first-config.yaml
 This playbook (`server_setup.yml`) is an **interactive server configuration and hardening tool** that automates the setup of a Linux server. It handles user management, package installation, firewall configuration, and common services.
